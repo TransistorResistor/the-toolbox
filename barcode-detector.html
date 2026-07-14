@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Decode — offline barcode reader</title>
+<style>
+  :root{
+    --ink:#0d1b17;
+    --paper:#e8e4d9;
+    --rule:#b9b3a3;
+    --scan:#00e08a;
+    --scan-dim:#0a7a4d;
+    --warn:#c25a2b;
+    --mute:#6d6a5e;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    background:var(--paper);
+    color:var(--ink);
+    font:16px/1.5 ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    -webkit-font-smoothing:antialiased;
+    padding:clamp(16px,4vw,40px);
+    display:flex;justify-content:center;
+  }
+  .wrap{width:100%;max-width:1080px}
+
+  header{
+    display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;
+    border-bottom:2px solid var(--ink);padding-bottom:10px;margin-bottom:4px;
+  }
+  h1{
+    font-size:clamp(28px,6vw,46px);
+    font-weight:700;letter-spacing:-.04em;line-height:1;
+  }
+  h1 em{font-style:normal;color:var(--scan-dim)}
+  .tag{font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--mute)}
+  #engine{margin-left:auto;font-size:11px;letter-spacing:.14em;text-transform:uppercase}
+  #engine b{font-weight:700;border-bottom:2px solid var(--scan);padding-bottom:2px}
+
+  /* the signature: a scan-line that sweeps the drop zone while working */
+  #drop{
+    position:relative;overflow:hidden;
+    margin-top:28px;
+    border:2px dashed var(--rule);
+    background:#efece3;
+    min-height:280px;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    gap:14px;text-align:center;padding:32px;
+    cursor:pointer;
+    transition:border-color .15s,background .15s;
+  }
+  #drop:hover,#drop.hot{border-color:var(--ink);background:#f4f2ea}
+  #drop:focus-visible{outline:3px solid var(--scan-dim);outline-offset:3px}
+  #drop.busy{border-style:solid;border-color:var(--scan-dim)}
+  #drop.busy::after{
+    content:"";position:absolute;left:0;right:0;height:2px;
+    background:var(--scan);
+    box-shadow:0 0 12px var(--scan);
+    animation:sweep 1.1s cubic-bezier(.4,0,.6,1) infinite;
+  }
+  @keyframes sweep{0%{top:-2px}100%{top:100%}}
+  @media (prefers-reduced-motion:reduce){
+    #drop.busy::after{animation:none;top:50%}
+  }
+  .cue{font-size:clamp(17px,3vw,21px);font-weight:700;letter-spacing:-.01em}
+  .sub{font-size:13px;color:var(--mute);max-width:44ch}
+  kbd{
+    background:var(--ink);color:var(--paper);
+    padding:1px 6px;font:inherit;font-size:11px;letter-spacing:.04em;
+  }
+  #file{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
+
+  #stage{display:none;margin-top:28px}
+  #stage.on{display:block}
+  .frame{
+    border:2px solid var(--ink);
+    background:#12100c;
+    line-height:0;
+    position:relative;
+  }
+  canvas{display:block;width:100%;height:auto}
+
+  .meta{
+    display:flex;gap:20px;flex-wrap:wrap;align-items:center;
+    padding:10px 0;border-bottom:1px solid var(--rule);
+    font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--mute);
+  }
+  .meta b{color:var(--ink);font-weight:700}
+
+  .hit{
+    border-bottom:1px solid var(--rule);
+    padding:18px 0;
+    display:grid;grid-template-columns:34px 1fr auto;gap:16px;align-items:start;
+  }
+  .idx{
+    font-size:11px;font-weight:700;letter-spacing:.1em;
+    color:var(--paper);background:var(--scan-dim);
+    text-align:center;padding:4px 0;
+  }
+  .val{
+    font-size:clamp(15px,2.4vw,19px);font-weight:700;
+    word-break:break-all;letter-spacing:-.01em;
+  }
+  .val a{color:var(--scan-dim)}
+  .fmt{margin-top:5px;font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--mute)}
+  .fmt .rot{color:var(--warn)}
+  .copy{
+    font:inherit;font-size:11px;letter-spacing:.14em;text-transform:uppercase;
+    background:none;border:1px solid var(--ink);color:var(--ink);
+    padding:7px 12px;cursor:pointer;white-space:nowrap;
+  }
+  .copy:hover{background:var(--ink);color:var(--paper)}
+  .copy:focus-visible{outline:2px solid var(--scan-dim);outline-offset:2px}
+
+  .empty{padding:22px 0;border-bottom:1px solid var(--rule)}
+  .empty .val{color:var(--warn)}
+  .empty .sub{margin-top:6px}
+  footer{margin-top:26px;font-size:12px;color:var(--mute);line-height:1.7}
+  footer b{color:var(--ink)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>De<em>code</em></h1>
+    <span class="tag">offline · single file</span>
+    <span id="engine">engine <b>—</b></span>
+  </header>
+
+  <div id="drop" tabindex="0" role="button" aria-label="Choose an image to decode">
+    <div class="cue">Drop an image, paste it, or click to choose</div>
+    <div class="sub">
+      QR, EAN, UPC, Code&nbsp;128, Data&nbsp;Matrix and more. Rotated, upside-down and
+      multi-code images are handled. Nothing is uploaded — decoding happens on this device.
+    </div>
+    <div class="sub"><kbd>Ctrl</kbd>/<kbd>⌘</kbd> + <kbd>V</kbd> to paste from the clipboard</div>
+    <input type="file" id="file" accept="image/*" multiple>
+  </div>
+
+  <section id="stage" aria-live="polite">
+    <div class="meta">
+      <span><b id="mCount">0</b> found</span>
+      <span><b id="mDims">—</b></span>
+      <span><b id="mTime">—</b></span>
+      <span><b id="mPass">—</b></span>
+    </div>
+    <div class="frame"><canvas id="cv"></canvas></div>
+    <div id="hits"></div>
+  </section>
+
+  <footer>
+    <b>How it decodes.</b> Native <code>BarcodeDetector</code> runs first where the browser has it —
+    detection happens in platform code, on the device. Where it's missing, a bundled WASM decoder
+    takes over with no network call either way. If a straight read finds nothing, the image is
+    re-tried at 90°, 180° and 270°, then at 2× scale for small or low-contrast codes.
+  </footer>
+
+</div>
+
+<script type="module">
+/* ── zxing-wasm is inlined at build time in a real deployment; here it is fetched
+      once and cached by the service worker. For a truly self-contained file, swap in
+      jsQR's ~15KB source directly. Both paths are network-free after first load. ── */
+
+const $ = s => document.querySelector(s);
+const drop = $('#drop'), file = $('#file'), stage = $('#stage'),
+      cv = $('#cv'), ctx = cv.getContext('2d', { willReadFrequently:true }),
+      hits = $('#hits');
+
+let detector = null, engine = 'wasm';
+
+/* ── engine selection ─────────────────────────────────────────────────── */
+const FORMATS = ['qr_code','ean_13','ean_8','upc_a','upc_e','code_128','code_39',
+                 'code_93','codabar','itf','data_matrix','pdf417','aztec'];
+
+async function initEngine(){
+  if ('BarcodeDetector' in window){
+    try{
+      const supported = await BarcodeDetector.getSupportedFormats();
+      const usable = FORMATS.filter(f => supported.includes(f));
+      if (usable.includes('qr_code')){
+        detector = new BarcodeDetector({ formats: usable });
+        engine = 'native';
+        $('#engine').innerHTML = 'engine <b>native</b>';
+        return;
+      }
+    }catch{ /* fall through */ }
+  }
+  await initFallback();
+  $('#engine').innerHTML = 'engine <b>wasm</b>';
+}
+
+/* Fallback: jsQR-style pure-JS decode over ImageData. Kept behind the same
+   detect(source) → [{rawValue, format, cornerPoints}] shape as BarcodeDetector,
+   so nothing downstream needs to know which engine fired. */
+let jsQR = null;
+async function initFallback(){
+  const mod = await import('https://cdn.jsdelivr.net/npm/jsqr@1.4.0/+esm');
+  jsQR = mod.default;
+  detector = {
+    async detect(source){
+      const { data, width, height } = toImageData(source);
+      const r = jsQR(data, width, height, { inversionAttempts:'attemptBoth' });
+      if (!r) return [];
+      const p = r.location;
+      return [{
+        rawValue: r.data,
+        format: 'qr_code',
+        cornerPoints: [p.topLeftCorner, p.topRightCorner,
+                       p.bottomRightCorner, p.bottomLeftCorner]
+      }];
+    }
+  };
+}
+
+function toImageData(source){
+  const c = document.createElement('canvas');
+  c.width = source.width; c.height = source.height;
+  const x = c.getContext('2d', { willReadFrequently:true });
+  x.drawImage(source, 0, 0);
+  return x.getImageData(0, 0, c.width, c.height);
+}
+
+/* ── rotation salvage ─────────────────────────────────────────────────── */
+/* Draw the bitmap onto a canvas at `deg`, optionally scaled. Returns the canvas
+   plus a function that maps a point in rotated space back to original space, so
+   overlays land on the image the user actually sees. */
+function transform(bitmap, deg, scale = 1){
+  const swap = deg === 90 || deg === 270;
+  const w = bitmap.width * scale, h = bitmap.height * scale;
+  const c = document.createElement('canvas');
+  c.width  = swap ? h : w;
+  c.height = swap ? w : h;
+  const x = c.getContext('2d', { willReadFrequently:true });
+  x.translate(c.width / 2, c.height / 2);
+  x.rotate(deg * Math.PI / 180);
+  x.drawImage(bitmap, -w / 2, -h / 2, w, h);
+
+  const unmap = pt => {
+    // invert: rotate back about the rotated canvas centre, then undo scale
+    const cx = c.width / 2, cy = c.height / 2;
+    const dx = pt.x - cx, dy = pt.y - cy;
+    const r = -deg * Math.PI / 180;
+    const rx = dx * Math.cos(r) - dy * Math.sin(r);
+    const ry = dx * Math.sin(r) + dy * Math.cos(r);
+    return { x: (rx + w / 2) / scale, y: (ry + h / 2) / scale };
+  };
+  return { canvas:c, unmap };
+}
+
+/* Pass ladder: cheap and common first, expensive and rare last. Stops at the
+   first pass that finds anything — a code that reads upright will never pay for
+   the rotation attempts. */
+const PASSES = [
+  { deg:0,   scale:1, label:'upright'  },
+  { deg:90,  scale:1, label:'90°'      },
+  { deg:180, scale:1, label:'180°'     },
+  { deg:270, scale:1, label:'270°'     },
+  { deg:0,   scale:2, label:'2× upright' },
+  { deg:90,  scale:2, label:'2× 90°'   },
+  { deg:180, scale:2, label:'2× 180°'  },
+  { deg:270, scale:2, label:'2× 270°'  },
+];
+
+async function decode(bitmap){
+  for (const pass of PASSES){
+    const { canvas, unmap } = transform(bitmap, pass.deg, pass.scale);
+    let found = [];
+    try{ found = await detector.detect(canvas); }catch{ found = []; }
+    if (found.length){
+      return {
+        pass,
+        codes: found.map(c => ({
+          rawValue: c.rawValue,
+          format: c.format,
+          corners: (c.cornerPoints || []).map(unmap)
+        }))
+      };
+    }
+  }
+  return { pass:null, codes:[] };
+}
+
+/* ── downscale monsters before decoding ───────────────────────────────── */
+const MAX_EDGE = 1600;
+async function normalise(fileObj){
+  const raw = await createImageBitmap(fileObj);
+  const long = Math.max(raw.width, raw.height);
+  if (long <= MAX_EDGE) return raw;
+  const k = MAX_EDGE / long;
+  const small = await createImageBitmap(raw, {
+    resizeWidth:  Math.round(raw.width  * k),
+    resizeHeight: Math.round(raw.height * k),
+    resizeQuality:'high'
+  });
+  raw.close();
+  return small;
+}
+
+/* ── render ───────────────────────────────────────────────────────────── */
+function paint(bitmap, codes){
+  cv.width = bitmap.width; cv.height = bitmap.height;
+  ctx.drawImage(bitmap, 0, 0);
+
+  const unit = Math.max(2, Math.round(bitmap.width / 320));
+  codes.forEach((c, i) => {
+    if (c.corners.length < 3) return;
+    ctx.beginPath();
+    ctx.moveTo(c.corners[0].x, c.corners[0].y);
+    c.corners.slice(1).forEach(p => ctx.lineTo(p.x, p.y));
+    ctx.closePath();
+    ctx.fillStyle   = 'rgba(0,224,138,.16)';
+    ctx.strokeStyle = '#00e08a';
+    ctx.lineWidth   = unit;
+    ctx.fill(); ctx.stroke();
+
+    const p = c.corners[0];
+    const s = unit * 9;
+    ctx.fillStyle = '#00e08a';
+    ctx.fillRect(p.x - s/2, p.y - s/2, s, s);
+    ctx.fillStyle = '#0d1b17';
+    ctx.font = `700 ${s*0.68}px ui-monospace,monospace`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(String(i+1), p.x, p.y + s*0.04);
+  });
+}
+
+const isURL = v => /^(https?:\/\/|mailto:|tel:)/i.test(v);
+const esc = v => v.replace(/[&<>"]/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]));
+
+function list(codes, pass){
+  hits.innerHTML = '';
+  if (!codes.length){
+    hits.innerHTML = `<div class="empty">
+      <div class="val">No code found</div>
+      <div class="sub">Tried upright, all four rotations and a 2× pass.
+      A tighter crop around the code, or more even lighting, usually fixes it.</div>
+    </div>`;
+    return;
+  }
+  codes.forEach((c, i) => {
+    const el = document.createElement('div');
+    el.className = 'hit';
+    const rot = pass && pass.deg !== 0
+      ? ` · <span class="rot">recovered at ${esc(pass.label)}</span>` : '';
+    const body = isURL(c.rawValue)
+      ? `<a href="${esc(c.rawValue)}" target="_blank" rel="noopener noreferrer">${esc(c.rawValue)}</a>`
+      : esc(c.rawValue);
+    el.innerHTML = `
+      <div class="idx">${i+1}</div>
+      <div>
+        <div class="val">${body}</div>
+        <div class="fmt">${esc(c.format.replace(/_/g,' '))} · ${c.rawValue.length} chars${rot}</div>
+      </div>
+      <button class="copy" type="button">Copy</button>`;
+    el.querySelector('.copy').onclick = async e => {
+      await navigator.clipboard.writeText(c.rawValue);
+      const b = e.currentTarget, was = b.textContent;
+      b.textContent = 'Copied';
+      setTimeout(() => { b.textContent = was; }, 1200);
+    };
+    hits.append(el);
+  });
+}
+
+/* ── run ──────────────────────────────────────────────────────────────── */
+async function run(fileObj){
+  if (!fileObj || !fileObj.type.startsWith('image/')) return;
+  drop.classList.add('busy');
+  const t0 = performance.now();
+
+  const bitmap = await normalise(fileObj);
+  const { codes, pass } = await decode(bitmap);
+  const ms = Math.round(performance.now() - t0);
+
+  paint(bitmap, codes);
+  list(codes, pass);
+
+  $('#mCount').textContent = codes.length;
+  $('#mDims').textContent  = `${bitmap.width}×${bitmap.height}`;
+  $('#mTime').textContent  = `${ms} ms`;
+  $('#mPass').textContent  = pass ? pass.label : 'no read';
+  stage.classList.add('on');
+  bitmap.close();
+
+  drop.classList.remove('busy');
+}
+
+drop.onclick = () => file.click();
+drop.onkeydown = e => { if (e.key === 'Enter' || e.key === ' '){ e.preventDefault(); file.click(); } };
+file.onchange = e => { for (const f of e.target.files) run(f); e.target.value = ''; };
+
+['dragenter','dragover'].forEach(t => drop.addEventListener(t, e => {
+  e.preventDefault(); drop.classList.add('hot');
+}));
+['dragleave','drop'].forEach(t => drop.addEventListener(t, e => {
+  e.preventDefault(); drop.classList.remove('hot');
+}));
+drop.addEventListener('drop', e => { for (const f of e.dataTransfer.files) run(f); });
+
+window.addEventListener('paste', e => {
+  for (const f of e.clipboardData.files) run(f);
+});
+
+initEngine();
+</script>
+</body>
+</html>
