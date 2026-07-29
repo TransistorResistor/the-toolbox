@@ -1,0 +1,9 @@
+torch
+transformers
+safetensors
+sentencepiece
+protobuf
+numpy
+pyyaml
+gguf
+mistral-common
